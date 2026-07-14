@@ -149,12 +149,21 @@
   .ptable-tile.empty{ visibility:hidden; cursor:default; }
   .ptable-tile.empty:hover{ transform:none; box-shadow:none; }
   .modal-close{ float:right; }
+
+  /* --- Hückel results --- */
+  #huckelDiagramWrap svg{ display:block; margin:10px auto; }
+  table.huckel-table{ border-collapse:collapse; font-family:var(--mono); font-size:12.5px; width:100%; }
+  table.huckel-table th, table.huckel-table td{
+    border:1px solid var(--border); padding:5px 8px; text-align:right;
+  }
+  table.huckel-table th{ color:var(--text-dim); text-align:right; background:var(--panel-2); }
+  table.huckel-table td:first-child, table.huckel-table th:first-child{ text-align:left; }
 </style>
 </head>
 <body>
 
 <header>
-  <h1>Molecule Drawing Workbench</h1>
+  <h1>Molecule Workbench</h1>
   <span class="tag">2D Lewis structures · VSEPR 3D · MOL / XYZ / SMILES</span>
   <div class="switch-wrap" style="margin-left:auto;">
     <span id="themeLabel">Dark canvas</span>
@@ -192,10 +201,10 @@
       <button data-tool="bond" data-order="3" data-style="plain">Triple bond</button>
       <button data-tool="bond" data-order="1" data-style="wedge">Wedge (front)</button>
       <button data-tool="bond" data-order="1" data-style="dash">Dash (back)</button>
-      <button data-tool="move">Move atom</button>
+      <button data-tool="move">Move</button>
       <div class="divider"></div>
-      <button data-tool="lonepair">Lone pair (click/shift-click atom)</button>
-      <button data-tool="movelp">Move lone pair</button>
+      <button data-tool="lonepair">Lone-pair (click/shift-click atom)</button>
+      <button data-tool="movelp">Move lone-pair</button>
       <button data-tool="charge+">Charge +</button>
       <button data-tool="charge-">Charge &#8722;</button>
       <div class="divider"></div>
@@ -250,9 +259,33 @@
     </div>
     <div class="hint">Drag to rotate · scroll to zoom. If the drawn molecule isn't a recognized compound, PubChem lookup falls back to the VSEPR generator automatically.</div>
     <div class="toolbar">
+      <label class="chk"><input type="checkbox" id="toggleESP"> Show electrostatic potential surface</label>
+      <span class="hint" id="dipoleOut" style="margin-left:auto;">Dipole moment: —</span>
+    </div>
+    <div class="toolbar">
       <span class="hint" style="margin-right:auto">Export 3D image:</span>
       <button id="btnExportPNG3D">PNG</button>
       <button id="btnExportGIF3D">GIF (rotating)</button>
+    </div>
+  </div>
+
+  <!-- HÜCKEL / PI SYSTEM PANEL -->
+  <div class="panel" style="grid-column: 1 / -1;">
+    <h2>Simple Hückel Molecular Orbital Analysis</h2>
+    <div class="toolbar">
+      <button data-tool="piselect">Select π atoms (click atoms)</button>
+      <button id="btnAutoPi">Auto-detect π system</button>
+      <button id="btnClearPi">Clear selection</button>
+      <div class="divider"></div>
+      <span class="hint">π electrons:</span>
+      <input type="number" id="piElectrons" value="0" style="width:70px;">
+      <button id="btnRunHuckel">Run Hückel calculation</button>
+    </div>
+    <div class="hint">Auto-detect finds atoms with a double/triple bond, plus any singly-bonded atom (like a pyrrole-type N or furan-type O) bridging two π atoms already in the set. It can't see conjugation that only exists via resonance structures (e.g. an allylic cation with no drawn double bond on the charged carbon) — use the selection tool to add/remove atoms by hand. π-electron count is auto-computed but editable.</div>
+    <div id="huckelResults" style="display:none;">
+      <div class="info-strip" id="huckelSummary"></div>
+      <div id="huckelDiagramWrap" style="overflow-x:auto;"></div>
+      <div id="huckelTableWrap" style="overflow-x:auto; margin-top:10px;"></div>
     </div>
   </div>
 
@@ -432,7 +465,7 @@ class Molecule {
   }
   newId(){ return this._id++; }
   addAtom(el, x, y, z){
-    const a = { id: this.newId(), el, x, y, z: z||0, charge:0, lp:-1, lpAngles:null, sel:false };
+    const a = { id: this.newId(), el, x, y, z: z||0, charge:0, lp:-1, lpAngles:null, sel:false, piSel:false };
     this.atoms.push(a);
     return a;
   }
@@ -1118,6 +1151,272 @@ function relax3D(m, iterations, dirAssignment){
 </script>
 <script>
 // ============================================================
+// Simple Hückel Molecular Orbital (HMO) theory
+// ============================================================
+// Standard textbook simple-Hückel parameters (Coulomb integral shift h_X and, implicitly,
+// resonance integral scale) for common heteroatoms, split by role:
+//  - "h1" applies when the atom contributes 1 pi-electron of its own (it has a formal
+//    multiple bond within the pi system, e.g. pyridine-type N, carbonyl O).
+//  - "h2" applies when the atom donates a full lone pair into the pi system instead
+//    (no multiple bond of its own within the pi system, e.g. pyrrole-type N, furan-type O).
+// alpha_X = alpha_C + h_X * beta_CC. These are approximate, commonly-cited textbook values —
+// different texts vary somewhat; they're meant for qualitative teaching use, not research use.
+const HUCKEL_PARAMS = {
+  C:  { h1: 0.0,  h2: 0.0  },
+  N:  { h1: 0.5,  h2: 1.5  },
+  O:  { h1: 1.0,  h2: 2.0  },
+  S:  { h1: 0.5,  h2: 1.5  },
+  P:  { h1: 0.3,  h2: 1.0  },
+  F:  { h1: 2.0,  h2: 3.0  },
+  Cl: { h1: 1.5,  h2: 2.0  },
+  Br: { h1: 1.5,  h2: 1.8  },
+  I:  { h1: 1.3,  h2: 1.6  },
+  B:  { h1: -0.5, h2: -0.5 } // boron is electron-deficient (empty p orbital, accepts density)
+};
+function huckelParamsFor(el){ return HUCKEL_PARAMS[el] || { h1:0, h2:0 }; }
+
+// Auto-detects which atoms plausibly belong to a conjugated pi system:
+//  1) any atom with a double/triple bond is definitely in (it has a p orbital in the pi system)
+//  2) any atom singly-bonded to 2+ atoms already in the set is added too (bridging lone-pair
+//     donors like pyrrole N/furan O, and ring-fusion atoms)
+// This is a heuristic based on the single Lewis structure drawn — it will NOT catch things like
+// an allylic/benzylic charged carbon that has no double bond of its own (true conjugation there
+// depends on resonance structures beyond what a single Lewis diagram encodes). The caller can
+// always manually add/remove atoms from the returned set before running the calculation.
+function detectPiSystem(mol){
+  const inSet = new Set();
+  mol.bonds.forEach(b=>{ if(b.order>=2){ inSet.add(b.a); inSet.add(b.b); } });
+  let changed = true;
+  while(changed){
+    changed = false;
+    mol.atoms.forEach(a=>{
+      if(inSet.has(a.id)) return;
+      const nbrsInSet = mol.neighbors(a.id).filter(id=>inSet.has(id)).length;
+      if(nbrsInSet>=2){ inSet.add(a.id); changed = true; }
+    });
+  }
+  return [...inSet];
+}
+
+// Whether an atom contributes 1 pi-electron (has its own multiple bond within the pi set)
+// or 2 (pure lone-pair donor, e.g. pyrrole N) — drives both alpha parameter and electron count.
+function isLonePairDonor(mol, atomId, piSet){
+  const bonds = mol.bondsOf(atomId);
+  const hasMultipleBondInSet = bonds.some(b=>{
+    const other = b.a===atomId? b.b : b.a;
+    return b.order>=2 && piSet.has(other);
+  });
+  return !hasMultipleBondInSet;
+}
+
+function defaultPiElectronCount(mol, piAtomIds){
+  const piSet = new Set(piAtomIds);
+  let total = 0;
+  piAtomIds.forEach(id=>{
+    const a = mol.getAtom(id);
+    const donor = isLonePairDonor(mol, id, piSet);
+    const base = donor ? 2 : 1;
+    total += base - a.charge;
+  });
+  return total;
+}
+
+// ---- Jacobi eigenvalue algorithm for real symmetric matrices ----
+// Returns { values: [n], vectors: [n][n] } where vectors[:,k] is the eigenvector for values[k].
+// (vectors returned as vectors[i][k] = i-th component of k-th eigenvector.)
+function jacobiEigen(matrixIn, maxSweeps){
+  maxSweeps = maxSweeps || 100;
+  const n = matrixIn.length;
+  const A = matrixIn.map(row=>row.slice());
+  let V = Array.from({length:n}, (_,i)=> Array.from({length:n}, (_,j)=> i===j?1:0));
+
+  function offDiagSum(){
+    let s=0;
+    for(let i=0;i<n;i++) for(let j=0;j<n;j++) if(i!==j) s += A[i][j]*A[i][j];
+    return s;
+  }
+
+  for(let sweep=0; sweep<maxSweeps; sweep++){
+    if(offDiagSum() < 1e-20) break;
+    for(let p=0;p<n-1;p++){
+      for(let q=p+1;q<n;q++){
+        if(Math.abs(A[p][q]) < 1e-14) continue;
+        const theta = (A[q][q]-A[p][p]) / (2*A[p][q]);
+        const t = Math.sign(theta||1) / (Math.abs(theta) + Math.sqrt(theta*theta+1));
+        const c = 1/Math.sqrt(t*t+1);
+        const s = t*c;
+        const app=A[p][p], aqq=A[q][q], apq=A[p][q];
+        A[p][p] = c*c*app - 2*s*c*apq + s*s*aqq;
+        A[q][q] = s*s*app + 2*s*c*apq + c*c*aqq;
+        A[p][q] = 0; A[q][p] = 0;
+        for(let i=0;i<n;i++){
+          if(i!==p && i!==q){
+            const aip=A[i][p], aiq=A[i][q];
+            A[i][p] = c*aip - s*aiq; A[p][i]=A[i][p];
+            A[i][q] = s*aip + c*aiq; A[q][i]=A[i][q];
+          }
+        }
+        for(let i=0;i<n;i++){
+          const vip=V[i][p], viq=V[i][q];
+          V[i][p] = c*vip - s*viq;
+          V[i][q] = s*vip + c*viq;
+        }
+      }
+    }
+  }
+  const values = A.map((row,i)=>row[i]);
+  // sort descending by eigenvalue (x); beta<0 physically, so larger x = lower energy = fills first
+  const order = values.map((v,i)=>i).sort((a,b)=> values[b]-values[a]);
+  const sortedValues = order.map(i=>values[i]);
+  const sortedVectors = Array.from({length:n}, (_,i)=> order.map(k=>V[i][k]));
+  return { values: sortedValues, vectors: sortedVectors };
+}
+
+/**
+ * Runs a simple Hückel MO calculation on the given pi-atom subset.
+ * @param {Molecule} mol
+ * @param {number[]} piAtomIds - atom ids to include in the pi system (order defines matrix index)
+ * @param {number} [electronOverride] - total pi electrons; auto-computed from the structure if omitted
+ * @returns structured result: matrix, energies (x, in units of beta), vectors (MO coefficients),
+ *          occupations, HOMO/LUMO indices, total pi energy (in units of beta), per-atom charge
+ *          density/net charge, and pi bond orders for bonded pairs within the set.
+ */
+function computeHuckel(mol, piAtomIds, electronOverride){
+  const n = piAtomIds.length;
+  if(n===0) return null;
+  const piSet = new Set(piAtomIds);
+  const idxOf = {}; piAtomIds.forEach((id,i)=> idxOf[id]=i);
+
+  // Build the Hückel matrix in units of beta: diagonal = h_X (alpha shift), off-diagonal = k_XY (=1, bonded only)
+  const H = Array.from({length:n}, ()=> new Array(n).fill(0));
+  piAtomIds.forEach((id,i)=>{
+    const a = mol.getAtom(id);
+    const donor = isLonePairDonor(mol, id, piSet);
+    const params = huckelParamsFor(a.el);
+    H[i][i] = donor ? params.h2 : params.h1;
+  });
+  mol.bonds.forEach(b=>{
+    if(piSet.has(b.a) && piSet.has(b.b)){
+      const i = idxOf[b.a], j = idxOf[b.b];
+      H[i][j] = 1; H[j][i] = 1;
+    }
+  });
+
+  const { values: x, vectors: C } = jacobiEigen(H);
+
+  const totalElectrons = electronOverride!==undefined && electronOverride!==null
+    ? electronOverride
+    : defaultPiElectronCount(mol, piAtomIds);
+
+  // Aufbau + Hund's rule filling across (possibly degenerate) MOs, x already sorted descending
+  const DEG_TOL = 1e-4;
+  const occ = new Array(n).fill(0);
+  let remaining = totalElectrons;
+  let level = 0;
+  while(remaining>0 && level<n){
+    // group of degenerate MOs starting at `level`
+    let groupEnd = level;
+    while(groupEnd+1<n && Math.abs(x[groupEnd+1]-x[level])<DEG_TOL) groupEnd++;
+    const groupSize = groupEnd-level+1;
+    // Hund's rule: one electron to each orbital in the group first
+    for(let k=level; k<=groupEnd && remaining>0; k++){ occ[k]+=1; remaining--; }
+    // then pair up if electrons remain and this group isn't exhausted
+    for(let k=level; k<=groupEnd && remaining>0; k++){ occ[k]+=1; remaining--; }
+    level = groupEnd+1;
+  }
+
+  const totalPiEnergyX = occ.reduce((s,o,k)=> s + o*x[k], 0); // in units of beta (alpha part handled separately)
+  let homoIdx=-1, lumoIdx=-1;
+  for(let k=0;k<n;k++){ if(occ[k]>0) homoIdx=k; }
+  for(let k=0;k<n;k++){ if(occ[k]<2){ lumoIdx=k; break; } }
+
+  // Atomic pi charge density q_i = sum_k occ_k * c_ik^2
+  const density = piAtomIds.map((id,i)=>{
+    let q=0;
+    for(let k=0;k<n;k++) q += occ[k]*C[i][k]*C[i][k];
+    return q;
+  });
+  const contributed = piAtomIds.map(id=>{
+    const a = mol.getAtom(id);
+    const donor = isLonePairDonor(mol, id, piSet);
+    return (donor?2:1) - a.charge;
+  });
+  const netCharge = density.map((q,i)=> contributed[i]-q);
+
+  // Pi bond orders for bonded pairs within the set: p_ij = sum_k occ_k * c_ik * c_jk
+  const bondOrders = [];
+  mol.bonds.forEach(b=>{
+    if(piSet.has(b.a) && piSet.has(b.b)){
+      const i=idxOf[b.a], j=idxOf[b.b];
+      let p=0;
+      for(let k=0;k<n;k++) p += occ[k]*C[i][k]*C[j][k];
+      bondOrders.push({ a:b.a, b:b.b, order:p });
+    }
+  });
+
+  return {
+    atomIds: piAtomIds,
+    matrix: H,
+    energiesX: x,          // E_k = alpha + x_k * beta
+    coefficients: C,       // C[i][k] = coefficient of atom i in MO k
+    occupations: occ,
+    totalElectrons,
+    totalPiEnergyX,
+    homoIdx, lumoIdx,
+    homoEnergyX: homoIdx>=0? x[homoIdx] : null,
+    lumoEnergyX: lumoIdx>=0? x[lumoIdx] : null,
+    gapX: (homoIdx>=0 && lumoIdx>=0) ? (x[homoIdx]-x[lumoIdx]) : null,
+    density, contributed, netCharge,
+    bondOrders
+  };
+}
+
+// ============================================================
+// Simple electronegativity-based partial charges (for the approximate ESP surface)
+// ============================================================
+const PAULING_EN = {
+  H:2.20, Li:0.98, Be:1.57, B:2.04, C:2.55, N:3.04, O:3.44, F:3.98,
+  Na:0.93, Mg:1.31, Al:1.61, Si:1.90, P:2.19, S:2.58, Cl:3.16,
+  K:0.82, Ca:1.00, Br:2.96, I:2.66, Zn:1.65, Fe:1.83
+};
+function electronegativityOf(el){ return PAULING_EN[el] || 2.2; }
+
+// Very simplified single-pass bond-dipole partial charge estimate: each bond shifts a small
+// amount of charge from the less electronegative atom to the more electronegative one,
+// scaled by the electronegativity difference and bond order. Meant to give a qualitative
+// (not quantitative) picture of charge distribution for the ESP visualization — not a
+// substitute for a real Gasteiger/QM charge model.
+function estimateSigmaCharges(mol){
+  const q = {};
+  mol.atoms.forEach(a=> q[a.id]=a.charge);
+  const K = 0.12;
+  mol.bonds.forEach(b=>{
+    const A = mol.getAtom(b.a), B = mol.getAtom(b.b);
+    const dEN = electronegativityOf(B.el) - electronegativityOf(A.el);
+    const shift = dEN * K * Math.min(b.order,2);
+    q[A.id] += shift;
+    q[B.id] -= shift;
+  });
+  return q;
+}
+
+// Combines the sigma-framework electronegativity estimate with a Hückel result (if provided)
+// into one final per-atom partial charge, used to color the ESP surface.
+function estimateAtomCharges(mol, huckelResult){
+  const q = estimateSigmaCharges(mol);
+  if(huckelResult){
+    huckelResult.atomIds.forEach((id,i)=>{
+      q[id] = (q[id]||0) + huckelResult.netCharge[i];
+    });
+  }
+  return q;
+}
+
+// (browser build: no CommonJS export needed)
+
+</script>
+<script>
+// ============================================================
 // Minimal dependency-free GIF89a encoder (static or animated).
 // No external library, no Web Worker — everything runs synchronously
 // on the main thread, so it can't be blocked by cross-origin worker
@@ -1490,6 +1789,11 @@ svg.addEventListener('mousedown', (e)=>{
     return;
   }
 
+  if(state.mode==='piselect'){
+    if(atom){ atom.piSel = !atom.piSel; render2D(); updatePiElectronDefault(); }
+    return;
+  }
+
   if(state.mode==='erase'){
     if(atom){ mol.removeAtom(atom.id); pushHistory(); render2D(); return; }
     if(bondEl){ mol.removeBond(Number(bondEl.dataset.bond)); pushHistory(); render2D(); return; }
@@ -1680,6 +1984,12 @@ function drawAtom(a){
     ring.setAttribute('fill','none'); ring.setAttribute('stroke', theme().bracket); ring.setAttribute('stroke-width','2');
     ring.setAttribute('stroke-dasharray','3 2');
     g.appendChild(ring);
+  }
+  if(a.piSel){
+    const ring2 = ns('circle');
+    ring2.setAttribute('cx',a.x); ring2.setAttribute('cy',a.y); ring2.setAttribute('r', a.sel?20:16);
+    ring2.setAttribute('fill','none'); ring2.setAttribute('stroke', '#c77dd6'); ring2.setAttribute('stroke-width','2');
+    g.appendChild(ring2);
   }
 
   // invisible hit circle always present for interaction (even when the atom is fully hidden,
@@ -1968,6 +2278,197 @@ document.getElementById('ptableSearch').addEventListener('input', (e)=>{
   buildPeriodicGrid(entry=> entry[1].toLowerCase().includes(q) || String(entry[0])===q);
 });
 
+// ============================================================
+// Simple Hückel MO analysis
+// ============================================================
+let lastHuckelResult = null; // exposed so the 3D panel can use it for the ESP surface overlay
+
+function currentPiAtomIds(){
+  return mol.atoms.filter(a=>a.piSel).map(a=>a.id);
+}
+function updatePiElectronDefault(){
+  const ids = currentPiAtomIds();
+  if(ids.length===0) return;
+  document.getElementById('piElectrons').value = defaultPiElectronCount(mol, ids);
+}
+
+document.getElementById('btnAutoPi').addEventListener('click', ()=>{
+  const detected = new Set(detectPiSystem(mol));
+  if(detected.size===0){ alert('No conjugated (double/triple bond) system found to detect. You can still select atoms manually with the π-select tool.'); return; }
+  mol.atoms.forEach(a=> a.piSel = detected.has(a.id));
+  render2D();
+  updatePiElectronDefault();
+});
+document.getElementById('btnClearPi').addEventListener('click', ()=>{
+  mol.atoms.forEach(a=> a.piSel=false);
+  render2D();
+  document.getElementById('huckelResults').style.display='none';
+  lastHuckelResult = null;
+});
+
+document.getElementById('btnRunHuckel').addEventListener('click', ()=>{
+  const ids = currentPiAtomIds();
+  if(ids.length===0){ alert('Select at least one atom for the π system first (use "Auto-detect π system" or the π-select tool).'); return; }
+  const override = document.getElementById('piElectrons').value;
+  const result = computeHuckel(mol, ids, override===''? undefined : Number(override));
+  lastHuckelResult = result;
+  renderHuckelResults(result);
+  if(document.getElementById('toggleESP').checked && typeof refreshESPSurface==='function') refreshESPSurface();
+  if(typeof updateDipoleDisplay==='function') updateDipoleDisplay();
+});
+
+function renderHuckelResults(res){
+  const wrap = document.getElementById('huckelResults');
+  wrap.style.display = 'block';
+  const n = res.atomIds.length;
+
+  // --- summary strip ---
+  const summary = document.getElementById('huckelSummary');
+  summary.innerHTML = '';
+  const items = [
+    ['π atoms', n],
+    ['π electrons', res.totalElectrons],
+    ['Total π energy', 'α·'+n+' + '+res.totalPiEnergyX.toFixed(3)+'β'],
+    ['HOMO', res.homoIdx>=0? ('α + '+res.energiesX[res.homoIdx].toFixed(3)+'β') : '—'],
+    ['LUMO', res.lumoIdx>=0? ('α + '+res.energiesX[res.lumoIdx].toFixed(3)+'β') : '—'],
+    ['HOMO–LUMO gap', res.gapX!==null? (res.gapX.toFixed(3)+'β') : '—'],
+  ];
+  items.forEach(([label,val])=>{
+    const d = document.createElement('div');
+    d.innerHTML = label+': <b>'+val+'</b>';
+    summary.appendChild(d);
+  });
+
+  // --- energy level diagram (SVG) ---
+  const diagWrap = document.getElementById('huckelDiagramWrap');
+  diagWrap.innerHTML = '';
+  diagWrap.appendChild(buildHuckelDiagramSVG(res));
+
+  // --- MO / charge tables ---
+  const tblWrap = document.getElementById('huckelTableWrap');
+  tblWrap.innerHTML = '';
+  tblWrap.appendChild(buildHuckelTables(res, mol));
+}
+
+function buildHuckelDiagramSVG(res){
+  const n = res.atomIds.length;
+  const W = Math.max(360, n*70), H = 260;
+  const svgEl = ns('svg');
+  svgEl.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svgEl.setAttribute('width', W); svgEl.setAttribute('height', H);
+
+  const xs = res.energiesX;
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const range = Math.max(0.01, maxX-minX);
+  const topY = 24, botY = H-30;
+  const yFor = (x)=> topY + (maxX-x)/range * (botY-topY);
+
+  // group degenerate levels for horizontal spacing
+  const DEG_TOL = 1e-4;
+  const groups = [];
+  let i=0;
+  while(i<n){
+    let j=i;
+    while(j+1<n && Math.abs(xs[j+1]-xs[i])<DEG_TOL) j++;
+    groups.push({ start:i, end:j });
+    i = j+1;
+  }
+
+  groups.forEach(g=>{
+    const count = g.end-g.start+1;
+    const lineW = 46;
+    const totalW = count*(lineW+14)-14;
+    const startX = W/2 - totalW/2;
+    for(let k=g.start; k<=g.end; k++){
+      const cx = startX + (k-g.start)*(lineW+14);
+      const y = yFor(xs[k]);
+      const line = ns('line');
+      line.setAttribute('x1',cx); line.setAttribute('x2',cx+lineW);
+      line.setAttribute('y1',y); line.setAttribute('y2',y);
+      const isHomo = k===res.homoIdx, isLumo = k===res.lumoIdx;
+      line.setAttribute('stroke', isHomo? theme().chargeCol : isLumo? theme().bracket : theme().bond);
+      line.setAttribute('stroke-width', (isHomo||isLumo) ? '3' : '2');
+      svgEl.appendChild(line);
+
+      // electrons as up/down arrows
+      const occ = res.occupations[k];
+      if(occ>=1){
+        svgEl.appendChild(makeElectronArrow(cx+lineW*0.35, y, true));
+      }
+      if(occ>=2){
+        svgEl.appendChild(makeElectronArrow(cx+lineW*0.65, y, false));
+      }
+      const lbl = ns('text');
+      lbl.setAttribute('x', cx+lineW/2); lbl.setAttribute('y', y-8);
+      lbl.setAttribute('text-anchor','middle'); lbl.setAttribute('font-size','10');
+      lbl.setAttribute('font-family','var(--mono)'); lbl.setAttribute('fill', '#8b9bab');
+      lbl.textContent = 'x='+xs[k].toFixed(3);
+      svgEl.appendChild(lbl);
+    }
+  });
+
+  // alpha reference line
+  const alphaY = yFor(0);
+  if(alphaY>topY-5 && alphaY<botY+5){
+    const aline = ns('line');
+    aline.setAttribute('x1',10); aline.setAttribute('x2',W-10);
+    aline.setAttribute('y1',alphaY); aline.setAttribute('y2',alphaY);
+    aline.setAttribute('stroke', theme().preview); aline.setAttribute('stroke-dasharray','2 3'); aline.setAttribute('stroke-width','1');
+    svgEl.appendChild(aline);
+    const alabel = ns('text');
+    alabel.setAttribute('x',12); alabel.setAttribute('y', alphaY-4);
+    alabel.setAttribute('font-size','10'); alabel.setAttribute('fill', '#8b9bab');
+    alabel.textContent = 'α (x=0)';
+    svgEl.appendChild(alabel);
+  }
+  return svgEl;
+}
+function makeElectronArrow(x,y,up){
+  const g = ns('g');
+  const line = ns('line');
+  const dy = up? 9 : -9;
+  line.setAttribute('x1',x); line.setAttribute('y1',y+dy);
+  line.setAttribute('x2',x); line.setAttribute('y2',y-dy);
+  line.setAttribute('stroke', theme().bond); line.setAttribute('stroke-width','1.6');
+  g.appendChild(line);
+  const head = ns('polygon');
+  const tipY = y-dy, s = up? -1: 1;
+  head.setAttribute('points', `${x},${tipY} ${x-3},${tipY+4*s} ${x+3},${tipY+4*s}`);
+  head.setAttribute('fill', theme().bond);
+  g.appendChild(head);
+  return g;
+}
+
+function buildHuckelTables(res, mol){
+  const wrap = document.createElement('div');
+  wrap.style.display='grid';
+  wrap.style.gridTemplateColumns='1fr 1fr';
+  wrap.style.gap='14px';
+  wrap.innerHTML = `<style>@media (max-width:900px){ #huckelTableWrap > div { grid-template-columns:1fr !important; } }</style>`;
+
+  const t1 = document.createElement('table'); t1.className='huckel-table';
+  let h1 = '<tr><th>MO</th><th>Energy (α+xβ)</th><th>Occupancy</th></tr>';
+  for(let k=0;k<res.atomIds.length;k++){
+    const tag = k===res.homoIdx? ' (HOMO)' : k===res.lumoIdx? ' (LUMO)' : '';
+    h1 += `<tr><td>ψ${k+1}${tag}</td><td>${res.energiesX[k].toFixed(4)}</td><td>${res.occupations[k]}</td></tr>`;
+  }
+  t1.innerHTML = h1;
+
+  const t2 = document.createElement('table'); t2.className='huckel-table';
+  let h2 = '<tr><th>Atom</th><th>Contributed e⁻</th><th>Calc. density</th><th>Net π charge</th></tr>';
+  res.atomIds.forEach((id,i)=>{
+    const a = mol.getAtom(id);
+    const nc = Math.abs(res.netCharge[i])<0.0005 ? 0 : res.netCharge[i];
+    h2 += `<tr><td>${a.el}${id}</td><td>${res.contributed[i]}</td><td>${res.density[i].toFixed(3)}</td><td>${nc>0?'+':''}${nc.toFixed(3)}</td></tr>`;
+  });
+  t2.innerHTML = h2;
+
+  const c1 = document.createElement('div'); c1.appendChild(t1);
+  const c2 = document.createElement('div'); c2.appendChild(t2);
+  wrap.appendChild(c1); wrap.appendChild(c2);
+  return wrap;
+}
+
 pushHistory();
 render2D();
 
@@ -2052,9 +2553,78 @@ function clearGroup(g){
   while(g.children.length) g.remove(g.children[0]);
 }
 
+// Diverging red(negative)-white(neutral)-blue(positive) colormap, the standard ESP convention.
+function espColor(charge, maxAbs){
+  const t = Math.max(-1, Math.min(1, charge/(maxAbs||0.05)));
+  const lerp=(a,b,f)=> a+(b-a)*f;
+  if(t<0){
+    const f=-t;
+    return [lerp(1,0.85,f), lerp(1,0.15,f), lerp(1,0.15,f)];
+  }
+  const f=t;
+  return [lerp(1,0.15,f), lerp(1,0.35,f), lerp(1,0.9,f)];
+}
+
+function renderESPSurface(m){
+  clearGroup(molGroup3d);
+  const com = m.centerOfMass();
+  const charges = (typeof estimateAtomCharges==='function') ? estimateAtomCharges(m, (typeof lastHuckelResult!=='undefined'? lastHuckelResult : null)) : {};
+  const vals = m.atoms.map(a=> charges[a.id]||0);
+  const maxAbs = Math.max(0.05, ...vals.map(Math.abs));
+  m.atoms.forEach(a=>{
+    const q = charges[a.id]||0;
+    const col = espColor(q, maxAbs);
+    const geo = new THREE.SphereGeometry(elRadius(a.el)*0.95, 24, 18);
+    const mat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(col[0],col[1],col[2]),
+      transparent:true, opacity:0.85, roughness:0.35, metalness:0.0
+    });
+    const sph = new THREE.Mesh(geo, mat);
+    sph.position.set(a.x-com.x, a.y-com.y, a.z-com.z);
+    molGroup3d.add(sph);
+  });
+  let maxR = 3;
+  m.atoms.forEach(a=>{
+    const d = Math.hypot(a.x-com.x, a.y-com.y, a.z-com.z);
+    if(d>maxR) maxR = d;
+  });
+  cam.dist = maxR*2.6+3;
+  updateCamera();
+  updateESPLegend(maxAbs);
+}
+
+function updateESPLegend(maxAbs){
+  let legend = document.getElementById('espLegend');
+  if(!legend){
+    legend = document.createElement('div');
+    legend.id = 'espLegend';
+    legend.style.cssText = 'position:absolute; top:8px; right:8px; font-size:11px; font-family:var(--mono); color:var(--text-dim); text-align:right; pointer-events:none;';
+    document.getElementById('canvas3d-wrap').appendChild(legend);
+  }
+  legend.innerHTML = `<div style="background:linear-gradient(90deg,#d92626,#ffffff,#2659e6); width:120px; height:10px; border-radius:3px; margin-bottom:2px;"></div>`+
+    `<div>−${maxAbs.toFixed(2)}e &nbsp; 0 &nbsp; +${maxAbs.toFixed(2)}e</div>`+
+    `<div>red = electron-rich · blue = electron-poor</div>`;
+}
+function removeESPLegend(){
+  const legend = document.getElementById('espLegend');
+  if(legend) legend.remove();
+}
+
+function refreshESPSurface(){
+  if(!mol3d) return;
+  renderMolecule3D(mol3d);
+}
+
 function renderMolecule3D(m){
   if(!threeReady) return;
   mol3d = m;
+  const espToggle = document.getElementById('toggleESP');
+  if(espToggle && espToggle.checked){
+    renderESPSurface(m);
+    updateDipoleDisplay();
+    return;
+  }
+  removeESPLegend();
   clearGroup(molGroup3d);
   const com = m.centerOfMass();
   const scale = 1;
@@ -2092,10 +2662,50 @@ function renderMolecule3D(m){
   });
   cam.dist = maxR*2.6+3;
   updateCamera();
+  updateDipoleDisplay();
 }
+
+// Computes the molecular dipole moment from estimated partial charges and 3D geometry.
+// mu = sum(q_i * r_i) in e·Å, converted to Debye (1 e·Å = 4.8032 D). Uses the geometric
+// centroid as the reference point — origin-independent (and thus physically meaningful)
+// for a neutral molecule; for a net-charged species the result is reference-point-dependent,
+// which is noted in the displayed label.
+function computeDipoleMoment(m){
+  if(!m || m.atoms.length===0) return null;
+  const charges = (typeof estimateAtomCharges==='function')
+    ? estimateAtomCharges(m, (typeof lastHuckelResult!=='undefined'? lastHuckelResult : null))
+    : {};
+  const com = m.centerOfMass();
+  let mux=0, muy=0, muz=0, totalQ=0;
+  m.atoms.forEach(a=>{
+    const q = charges[a.id]||0;
+    mux += q*(a.x-com.x); muy += q*(a.y-com.y); muz += q*(a.z-com.z);
+    totalQ += q;
+  });
+  const magEA = Math.hypot(mux,muy,muz); // e·Å
+  const debye = magEA * 4.8032;
+  return { vector:[mux,muy,muz], magnitudeDebye: debye, totalCharge: totalQ };
+}
+
+function updateDipoleDisplay(){
+  const el = document.getElementById('dipoleOut');
+  if(!el) return;
+  if(!mol3d){ el.textContent = 'Dipole moment: — (generate a 3D structure first)'; return; }
+  const d = computeDipoleMoment(mol3d);
+  if(!d){ el.textContent = 'Dipole moment: —'; return; }
+  const approx = Math.abs(d.totalCharge) > 0.05; // net-charged species: origin-dependent, flag it
+  el.textContent = 'Dipole moment: ' + d.magnitudeDebye.toFixed(2) + ' D' + (approx? ' (approx. — net-charged species)' : '');
+}
+
+document.getElementById('toggleESP').addEventListener('change', ()=>{
+  if(mol3d) renderMolecule3D(mol3d);
+  else if(document.getElementById('toggleESP').checked) alert('Generate or load a 3D structure first.');
+  updateDipoleDisplay();
+});
 
 function update3DPlaceholder(){
   if(molGroup3d) clearGroup(molGroup3d);
+  removeESPLegend();
   mol3d = null;
 }
 
