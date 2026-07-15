@@ -250,10 +250,6 @@
       <input type="text" id="pubchemQuery" placeholder="molecule name, e.g. aspirin" style="flex:1; min-width:140px;">
       <button id="btnPubchem">Look up in PubChem</button>
     </div>
-    <div id="canvas3d-wrap">
-      <canvas id="canvas3d"></canvas>
-      <div id="three-status">Loading 3D engine…</div>
-    </div>
     <div class="hint">Drag to rotate · scroll to zoom. If the drawn molecule isn't a recognized compound, PubChem lookup falls back to the VSEPR generator automatically.</div>
     <div class="toolbar">
       <label class="chk"><input type="checkbox" id="toggleESP"> Show electrostatic potential surface</label>
@@ -263,6 +259,10 @@
       <span class="hint" style="margin-right:auto">Export 3D image:</span>
       <button id="btnExportPNG3D">PNG</button>
       <button id="btnExportGIF3D">GIF (rotating)</button>
+    </div>
+    <div id="canvas3d-wrap">
+      <canvas id="canvas3d"></canvas>
+      <div id="three-status">Loading 3D engine…</div>
     </div>
   </div>
 
